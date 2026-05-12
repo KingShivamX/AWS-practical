@@ -44,8 +44,11 @@ my-node-app/
 └── scripts/
     ├── install_dependencies.sh
     ├── start_server.sh
-    └── stop_server.sh
+    ├── stop_server.sh
+    └── validate_service.sh   ← required: appspec.yml references it; missing file = CodeDeploy ScriptMissing
 ```
+
+> **Rule:** Every `location:` under `hooks:` in `appspec.yml` must exist in the repo at that path. CodeBuild zips the repo → CodeDeploy extracts it → if a script is missing, the matching hook fails (often **ValidateService** with `ScriptMissing`).
 
 ---
 
@@ -231,19 +234,10 @@ hooks:
 ### FILE 5: `scripts/stop_server.sh`
 ```bash
 #!/bin/bash
-# This script stops the currently running Node.js server
+# Stop the Node app before a new revision is installed (must exit 0 for CodeDeploy)
 
-echo "=== STOPPING SERVER ==="
-
-# Kill by command line (process name is "node", not "node" as pgrep -x would require)
 pkill -f "node app.js" 2>/dev/null || true
-# Free port 3000 if something else grabbed it (optional safety net)
-if command -v fuser &>/dev/null; then
-  fuser -k 3000/tcp 2>/dev/null || true
-fi
-echo "Stop step finished (ignore 'no process' messages)."
-
-# Exit 0 = success (important! CodeDeploy checks exit code)
+sleep 2
 exit 0
 ```
 
@@ -252,26 +246,16 @@ exit 0
 ### FILE 6: `scripts/install_dependencies.sh`
 ```bash
 #!/bin/bash
-# Runs before files are copied. Install system-level stuff here.
+# Runs before files are copied. Keep this fast — long yum update can hit the hook timeout.
 
-echo "=== INSTALLING DEPENDENCIES ==="
+# Do NOT run yum update -y here unless you raise appspec timeout; it often exceeds 5 minutes.
 
-# Update package manager
-yum update -y          # Amazon Linux uses yum
-# apt-get update -y   # Ubuntu uses apt-get
-
-# Install Node.js if not present
-if ! command -v node &> /dev/null
-then
-    echo "Node.js not found. Installing..."
+if ! command -v node &> /dev/null; then
     curl -fsSL https://rpm.nodesource.com/setup_18.x | bash -
     yum install -y nodejs
 fi
 
-# Create app directory if it doesn't exist
 mkdir -p /var/www/html
-
-echo "Dependencies installed successfully."
 exit 0
 ```
 
@@ -280,27 +264,13 @@ exit 0
 ### FILE 7: `scripts/start_server.sh`
 ```bash
 #!/bin/bash
-# This script starts your Node.js application
+# Start once per deploy (only referenced from ApplicationStart in appspec.yml)
 
-echo "=== STARTING SERVER ==="
-
-cd /var/www/html
-
-# Ensure nothing is still listening on 3000 (re-deploy, failed prior hook, etc.)
 pkill -f "node app.js" 2>/dev/null || true
 sleep 1
-
-# Install npm packages on the server
+cd /var/www/html
 npm install
-
-# Start the server in background using nohup
-# nohup = "no hang up" — keeps process running after SSH disconnects
-# & = run in background
-# > /var/log/app.log = redirect output to log file
-# 2>&1 = redirect error output to same log file
 nohup node app.js > /var/log/app.log 2>&1 &
-
-echo "Server started. Check /var/log/app.log for output."
 exit 0
 ```
 
