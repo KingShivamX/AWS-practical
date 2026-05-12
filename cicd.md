@@ -198,15 +198,11 @@ hooks:
       timeout: 300
       runas: root
 
-  AfterInstall:
-    # Runs AFTER files are copied to server
-    # Good for: set permissions, configure the app, set env variables
-    - location: scripts/start_server.sh
-      timeout: 300
-      runas: root
+  # Do NOT run start_server.sh in AfterInstall AND ApplicationStart — that starts Node twice.
+  # First start binds :3000; second hits EADDRINUSE → log error → ValidateService / health can fail (HEALTH_CONSTRAINTS).
 
   ApplicationStart:
-    # Runs to START your new application
+    # Runs AFTER files are on the server — start the app once here
     - location: scripts/start_server.sh
       timeout: 300
       runas: root
@@ -225,8 +221,8 @@ hooks:
 2. DownloadBundle           ← CodeDeploy downloads artifact from S3 (automatic)
 3. BeforeInstall            ← pre-copy setup
 4. Install                  ← CodeDeploy copies files (automatic)
-5. AfterInstall             ← post-copy setup
-6. ApplicationStart         ← start new app
+5. AfterInstall             ← optional (e.g. chmod); do not duplicate "start" here if ApplicationStart starts the app
+6. ApplicationStart         ← start new app (one place only for listen/bind)
 7. ValidateService          ← confirm it's working
 ```
 
@@ -239,15 +235,13 @@ hooks:
 
 echo "=== STOPPING SERVER ==="
 
-# Check if node is running and kill it
-if pgrep -x "node" > /dev/null
-then
-    echo "Node process found. Killing it..."
-    pkill -f "node app.js"
-    echo "Server stopped."
-else
-    echo "No Node process running. Nothing to stop."
+# Kill by command line (process name is "node", not "node" as pgrep -x would require)
+pkill -f "node app.js" 2>/dev/null || true
+# Free port 3000 if something else grabbed it (optional safety net)
+if command -v fuser &>/dev/null; then
+  fuser -k 3000/tcp 2>/dev/null || true
 fi
+echo "Stop step finished (ignore 'no process' messages)."
 
 # Exit 0 = success (important! CodeDeploy checks exit code)
 exit 0
@@ -291,6 +285,10 @@ exit 0
 echo "=== STARTING SERVER ==="
 
 cd /var/www/html
+
+# Ensure nothing is still listening on 3000 (re-deploy, failed prior hook, etc.)
+pkill -f "node app.js" 2>/dev/null || true
+sleep 1
 
 # Install npm packages on the server
 npm install
@@ -877,6 +875,7 @@ Your guide uses **CloudWatch Events** on CodeCommit so a push (including one mir
 | Pipeline **Deploy** failed | CodeDeploy → deployment → **Lifecycle event** errors | “ValidateService non-zero, missing appspec, wrong paths, agent down.” |
 | App not reachable in browser | EC2 **public IP**, **security group** port 3000, app binding `0.0.0.0` | “Network path vs deploy success — pipeline can succeed but app misconfigured.” |
 | Old version still showing | Browser cache; confirm **new deployment** succeeded; `curl` on instance | “Distinguish deploy pipeline vs process restart/caching.” |
+| **`EADDRINUSE` in `/var/log/app.log`** + **`HEALTH_CONSTRAINTS`** | Two causes: (1) **`start_server.sh` listed twice** in `appspec.yml` (AfterInstall + ApplicationStart) — second start fails; (2) old Node still on port 3000. Fix: start only in **ApplicationStart**; in `start_server.sh` run `pkill -f "node app.js"` before `nohup`. | “Only one process should bind the port; hooks must be idempotent.” |
 
 ---
 
