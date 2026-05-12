@@ -6,20 +6,20 @@ I'll walk you through **everything** — every file, every console option, every
 
 ## 🗂️ PART 0 — WHAT WE ARE BUILDING (Big Picture)
 
-**Region:** Create every AWS resource in **`us-east-1`** (EC2, S3, CodeBuild, CodePipeline, CodeDeploy, CodeStar Connection).
+**Region:** use **`us-east-1`** (US East, N. Virginia) for everything in this practical — EC2, S3, CodeCommit, CodeBuild, CodePipeline, CodeDeploy, and when you run `aws configure` / GitHub Secrets.
 
 ```
 Your GitHub Repo
       │
       │  (you only `git push` here)
       ▼
-  CodeStar Connection  ──(change detection)──▶  CodePipeline
-                              │
+ GitHub Actions  ──mirrors to──▶  CodeCommit  ──(webhook trigger)──▶  CodePipeline
+                                           │
                               ┌────────────┼────────────┐
                               ▼            ▼            ▼
                            STAGE 1      STAGE 2      STAGE 3
                            Source       Build        Deploy
-                         (GitHub)    (CodeBuild)  (CodeDeploy)
+                        (CodeCommit) (CodeBuild)  (CodeDeploy)
                                           │            │
                                           ▼            ▼
                                       S3 Bucket     EC2 Server
@@ -38,6 +38,9 @@ my-node-app/
 ├── package.json            ← Node dependencies
 ├── buildspec.yml           ← tells CodeBuild what to do
 ├── appspec.yml             ← tells CodeDeploy how to deploy
+├── .github/
+│   └── workflows/
+│       └── sync-to-codecommit.yml   ← GitHub pushes your commits into CodeCommit automatically
 └── scripts/
     ├── install_dependencies.sh
     ├── start_server.sh
@@ -394,7 +397,7 @@ yum install -y nodejs
 
 echo "Setup complete"
 ```
-> This guide uses **`us-east-1`** everywhere. The `wget` URL must match the region where your EC2 and CodeDeploy run.
+> This URL matches **`us-east-1`**. If you ever use another region, replace `us-east-1` in the hostname with your region.
 
 2. Click **Launch Instance**
 3. Note down the **Public IP** of your EC2 instance
@@ -410,7 +413,7 @@ echo "Setup complete"
 | Option | What to set | Explanation |
 |---|---|---|
 | **Bucket name** | `my-app-artifacts-[yourname]` | Must be globally unique. Add your name to make it unique |
-| **Region** | `us-east-1` (same as everything else in this guide) | Keep all services in same region |
+| **Region** | **`us-east-1`** | Same region everywhere |
 | **Object Ownership** | ACLs disabled | Recommended. Bucket owner owns all objects |
 | **Block Public Access** | Keep ALL blocked | Artifacts are private — only CodeBuild/CodeDeploy access them via IAM |
 | **Bucket Versioning** | **ENABLE THIS** | Keeps history of every artifact uploaded. If new build breaks, you can grab old version |
@@ -431,33 +434,86 @@ echo "Setup complete"
 
 ---
 
-### STEP 4: Connect GitHub with AWS CodeStar Connections
+### STEP 4: CodeCommit — you push only to GitHub
 
-> **This guide uses GitHub as the only Git remote.** CodePipeline and CodeBuild pull code through a **CodeStar Connection**. There is **no CodeCommit** and no mirror workflow.
+Flow: **`git push` → GitHub → GitHub Actions → CodeCommit** → pipeline (Steps 5–7 stay CodeCommit-based).
 
-Do this **before** you create the CodeBuild project (**Step 5**) and the pipeline (**Step 7**), so you can pick the same connection everywhere.
+**4a — Create the CodeCommit repo**
 
-1. **Create a GitHub repository** (if you have not already) and push your project files from Part 1 — at minimum `app.js`, `package.json`, `buildspec.yml`, `appspec.yml`, and the `scripts/` folder — on branch **`main`**.
+1. Console region: **`us-east-1`**
+2. **CodeCommit** → **Create repository**
+3. Name: **`my-node-app`** (same name everywhere below)
+4. Create
 
-2. In the AWS console, open **Developer Tools** → **Settings** → **Connections** (also listed under **CodePipeline** / **CodeStar** depending on UI version).
+**4b — IAM user GitHub will use to push into CodeCommit**
 
-3. Click **Create connection**.
+1. **IAM** → **Users** → **Create user** → name e.g. `github-codecommit-sync`
+2. Attach **`AWSCodeCommitPowerUser`** (simple for the exam) or a tighter custom policy limited to repo `my-node-app`
+3. **Security credentials** → **Create access key** → **Application running outside AWS** → save **Access key ID** and **Secret access key**
 
-4. **Provider**: **GitHub**.
+**4c — GitHub secrets**
 
-5. **Connection name**: e.g. `github-my-node-app` (any logical name).
+Repo → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**:
 
-6. Finish the wizard: you will be redirected to **GitHub** to **authorize AWS Connector for GitHub** (or similar). Approve access for the account/org that owns your repo.
-
-7. Wait until the connection status is **Available** (green). If it stays **Pending**, complete authorization from the connection detail page.
-
-**Keep these aligned across Steps 5 and 7:**
-
-| Item | Value |
+| Name | Value |
 |---|---|
-| **AWS Region** | **`us-east-1`** for this entire guide |
-| **Git branch** | **`main`** (must match pipeline + CodeBuild) |
-| **Repo** | Same GitHub repo you select in CodeBuild and in the pipeline source stage |
+| `AWS_ACCESS_KEY_ID` | From step 4b |
+| `AWS_SECRET_ACCESS_KEY` | From step 4b |
+
+**4d — Workflow file**
+
+Create `.github/workflows/sync-to-codecommit.yml` in your GitHub repo:
+
+```yaml
+name: Sync GitHub to CodeCommit
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - run: pip install git-remote-codecommit
+
+      - name: Push to CodeCommit
+        run: |
+          git remote add codecommit codecommit::us-east-1://my-node-app
+          git push codecommit HEAD:refs/heads/main
+```
+
+Commit and push this file to **`main`**. After that, day-to-day work is only:
+
+```bash
+git push origin main
+```
+
+The workflow copies that commit into CodeCommit; **CloudWatch Events on CodeCommit** starts your pipeline (Step 7).
+
+**Keep these matching**
+
+| Setting | Value |
+|---|---|
+| AWS region | **`us-east-1`** everywhere (workflow, console, `aws configure`) |
+| Branch | **`main`** (workflow, pipeline, CodeBuild) |
+| Repo name | **`my-node-app`** in CodeCommit and in `codecommit::us-east-1://my-node-app` |
+
+**If you need a manual push once** (e.g. debugging): install `git-remote-codecommit`, run `aws configure` with region **`us-east-1`**, then `git clone codecommit::us-east-1://my-node-app` and push — same repo URL pattern as in the workflow.
 
 ---
 
@@ -478,11 +534,10 @@ Do this **before** you create the CodeBuild project (**Step 5**) and the pipelin
 **Source:**
 | Option | Value | Explanation |
 |---|---|---|
-| **Source provider** | **GitHub** (via CodeStar Connections) | Console may say **GitHub** with a note about connections |
-| **Connection** | Select the connection you created in **Step 4** | Must be **Available** |
-| **Repository** | Your GitHub repo (e.g. `YOUR_USERNAME/my-node-app`) | Same repo the pipeline will use |
+| **Source provider** | `AWS CodeCommit` | Where to pull code from |
+| **Repository** | `my-node-app` | Your repo |
 | **Reference type** | `Branch` | Build from a branch (not a specific commit) |
-| **Branch** | `main` | Must match the pipeline source branch |
+| **Branch** | `main` | Which branch to build |
 
 **Environment:**
 | Option | Value | Explanation |
@@ -494,7 +549,7 @@ Do this **before** you create the CodeBuild project (**Step 5**) and the pipelin
 | **Image version** | `Always use the latest` | Auto-update the build image |
 | **Environment type** | `Linux` | |
 | **Privileged** | Disable (unless using Docker-in-Docker) | Enables Docker inside build. Only needed if your build creates Docker images |
-| **Service role** | `New service role` | CodeBuild needs IAM permissions to access S3, CloudWatch Logs, and (via the connection) your GitHub source |
+| **Service role** | `New service role` | CodeBuild needs IAM permissions to access S3, CodeCommit, etc. |
 | **Role name** | `codebuild-my-node-app-service-role` | Auto-created |
 
 **Buildspec:**
@@ -601,7 +656,7 @@ Do this **before** you create the CodeBuild project (**Step 5**) and the pipelin
 |---|---|---|
 | **Pipeline name** | `my-node-app-pipeline` | |
 | **Execution mode** | `Superseded` | If a new commit comes in while pipeline is running, the old run gets cancelled and new one starts. Alternative: `Queued` = wait your turn. `Parallel` = run both at same time |
-| **Service role** | `New service role` | Auto-creates IAM role for pipeline to access CodeStar Connections (GitHub), CodeBuild, CodeDeploy, S3 |
+| **Service role** | `New service role` | Auto-creates IAM role for pipeline to access CodeCommit, CodeBuild, CodeDeploy, S3 |
 | **Artifact store** | `Default location` | Uses the S3 bucket in your region. Alternative: `Custom location` = specify your own bucket |
 | **Encryption key** | `Default AWS managed key` | Encrypts pipeline artifacts |
 
@@ -611,11 +666,10 @@ Do this **before** you create the CodeBuild project (**Step 5**) and the pipelin
 
 | Option | Value | Explanation |
 |---|---|---|
-| **Source provider** | **GitHub (Version 2)** or **GitHub** via **AWS CodeStar Connections** | Exact label depends on console version |
-| **Connection** | Same **Available** connection as in Step 4 | |
-| **Repository** | Same GitHub repo as CodeBuild (e.g. `owner/repo`) | |
+| **Source provider** | `AWS CodeCommit` | Where pipeline reads code from |
+| **Repository name** | `my-node-app` | |
 | **Branch name** | `main` | Which branch to watch for changes |
-| **Change detection options** | **Amazon CloudWatch Events (recommended)** | Starts the pipeline when GitHub notifies AWS via the connection (like a webhook). Alternative: polling — slower |
+| **Change detection options** | `Amazon CloudWatch Events (recommended)` | ← THIS IS THE WEBHOOK. CloudWatch watches CodeCommit and triggers pipeline automatically on every `git push`. Alternative: `AWS CodePipeline` = pipeline polls CodeCommit every minute (slower, old way) |
 | **Output artifact format** | `CodePipeline default` | How the source code is packaged for the next stage |
 
 ---
@@ -726,10 +780,10 @@ IF SOMETHING FAILS ON GREEN:
 > So every build artifact (zip file) is kept. If a new build breaks production, you can roll back by deploying an older version directly from S3. Without versioning, old artifacts get overwritten.
 
 **Q: What is a webhook in CodePipeline?**
-> With GitHub via **CodeStar Connections**, AWS receives repository change notifications so **CloudWatch Events** can start the pipeline right after you **`git push`**. If you turned off event-based detection and used polling instead, runs would be delayed until the next poll.
+> It's an event trigger. When you push to CodeCommit, CloudWatch Events detects the change and automatically starts the pipeline. Without webhook, you'd have to manually click "Release Change" every time.
 
-**Q: Where does the pipeline get source code if we are not using CodeCommit?**
-> From **GitHub** through the **CodeStar Connection**. You authorize AWS once; the source stage clones the branch you configured (here **`main`** in **`us-east-1`**).
+**Q: If I only push to GitHub, how does CodePipeline still run?**
+> GitHub Actions copies your commit into **CodeCommit**. The pipeline is still triggered by CodeCommit (CloudWatch Events), same as if you had pushed to CodeCommit yourself.
 
 **Q: What is $CODEBUILD_BUILD_NUMBER?**
 > An auto-incrementing number assigned to each build (1, 2, 3...). Used to give each artifact a unique name so they don't overwrite each other in S3.
@@ -782,14 +836,14 @@ Then open in browser: `http://YOUR_EC2_PUBLIC_IP:3000`
 res.end('<h1>Hello from Blue/Green Deployment! Version 2.0</h1>');
 ```
 
-2. Push to **GitHub**:
+2. Push to **GitHub** only (Step 4 workflow updates CodeCommit for you):
 ```bash
 git add .
 git commit -m "Update to version 2.0"
 git push origin main
 ```
 
-3. Go to **CodePipeline** console — watch the pipeline automatically trigger and run through all 3 stages after GitHub notifies AWS (usually within about a minute).
+3. In GitHub → **Actions**, confirm **Sync GitHub to CodeCommit** finished (usually under a minute). Then open **CodePipeline** — it should run all 3 stages after CodeCommit receives the commit.
 
 4. After it completes, refresh `http://YOUR_EC2_PUBLIC_IP:3000` — it should now say **Version 2.0**
 
