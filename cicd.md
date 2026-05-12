@@ -673,6 +673,25 @@ The workflow copies that commit into CodeCommit; **CloudWatch Events on CodeComm
 
 ---
 
+### Two S3 buckets — why `codepipeline-us-east-1-…` is full and `my-app-artifacts-…` is empty
+
+| Bucket | Who creates it | What goes inside |
+|---|---|---|
+| **`codepipeline-us-east-1-899104682604-…`** | **AWS**, when you set **Artifact store** → **Default location** on the pipeline | Encrypted zips for **every handoff between stages**: Source → Build → Deploy. This is the **pipeline artifact store** — normal and expected. |
+| **`my-app-artifacts-shivam`** | **You**, in **Step 3** (and you pointed **CodeBuild** → **Artifacts** → **Amazon S3** here) | Intended as **CodeBuild’s own** output bucket. When the build runs **only as part of CodePipeline**, the pipeline usually passes the build output through **its default `codepipeline-*` bucket** to CodeDeploy. Your custom bucket can stay **empty** unless you run CodeBuild alone or wire the pipeline to use it (below). |
+
+**Nothing is “broken”.** You have two artifact concepts: (1) **pipeline stage artifacts** (default bucket), (2) **optional CodeBuild S3 output** (your bucket). The guide used both; AWS filled the one the pipeline actually uses.
+
+**If you want a single bucket (optional “fix”):**
+
+1. **CodePipeline** → your pipeline → **Edit** → **Edit** (pipeline settings) → **Advanced** / **Artifact store** → **Custom location** → choose **`my-app-artifacts-shivam`** (same region `us-east-1`).  
+2. Save. The console / wizard may add or prompt for **bucket policy** so the **CodePipeline service role** can `s3:GetObject`, `s3:PutObject`, `s3:PutObjectAcl`, `s3:GetBucketVersioning`, `s3:GetBucketLocation` on that bucket (follow any **Fix** / **Update policy** link AWS shows).  
+3. After that, new pipeline runs write stage artifacts into **`my-app-artifacts-shivam`** instead of the auto bucket. You can leave the old `codepipeline-*` bucket in place until you confirm runs succeed, then **empty and delete** it only if nothing else references it.
+
+**If you are fine with two buckets:** leave as-is. Use **`my-app-artifacts-shivam`** for lifecycle / versioning practice, or later set CodeBuild artifact type to **no secondary S3** if you only care about pipeline flow — the **`codepipeline-*`** bucket is the one that matters for **Source → Build → Deploy** today.
+
+---
+
 ## 🔵🟢 PART 3 — BLUE/GREEN DEPLOYMENT EXPLAINED DEEPLY
 
 ### What is it?
