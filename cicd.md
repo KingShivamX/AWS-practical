@@ -804,7 +804,9 @@ IF SOMETHING FAILS ON GREEN:
 
 ## 🚀 PART 5 — QUICK VERIFICATION CHECKLIST
 
-After everything is set up, verify:
+Use **CLI on EC2** plus **AWS Console** together — interviewers often ask “where would you look in the console if X fails?”
+
+### On the EC2 instance (SSH)
 
 ```bash
 # SSH into your EC2
@@ -821,7 +823,7 @@ curl http://localhost:3000
 # Check app logs
 cat /var/log/app.log
 
-# Check CodeDeploy deployment logs
+# Check CodeDeploy agent log (deployments, hook execution)
 cat /var/log/aws/codedeploy-agent/codedeploy-agent.log
 ```
 
@@ -829,23 +831,113 @@ Then open in browser: `http://YOUR_EC2_PUBLIC_IP:3000`
 
 ---
 
+### AWS Console map — where to click for verification (`us-east-1`)
+
+| AWS service | How to get there (console) | What you verify | Interview angle |
+|---|---|---|---|
+| **CodePipeline** | `Developer tools` → **CodePipeline** → Pipelines → `my-node-app-pipeline` | Latest **execution** is **Succeeded**; Source → Build → Deploy all green | “End-to-end orchestration; stages pass artifacts in S3.” |
+| **CodePipeline execution** | Same pipeline → click the **pipeline name** → latest execution row | **Trigger** (what started it), **Commit ID**, duration, **Stage details** | “Each stage can fail independently — check which stage failed first.” |
+| **CodeBuild** | **CodeBuild** → **Build projects** → `my-node-app-build` → **Build history** | Status **Succeeded**; click build → **Logs** tab | “Buildspec phases: install, pre_build, build, post_build; logs stream to CloudWatch.” |
+| **CodeDeploy** | **CodeDeploy** → **Applications** → `my-node-app-deploy` → **Deployments** | **Status** Succeeded; **Lifecycle events** expanded | “Hooks run in order; failed hook shows which script broke.” |
+| **CodeDeploy deployment detail** | Click one deployment ID | **Events** timeline (e.g. BeforeInstall, AfterInstall), instance ID | “Blue/Green vs In-place changes what you see here (e.g. target groups).” |
+| **S3** | **S3** → your artifact bucket `my-app-artifacts-*` | New objects after build; versioning shows history | “Artifacts bucket vs pipeline default artifact store — know both exist.” |
+| **CloudWatch Logs** | **CloudWatch** → **Log groups** | `/aws/codebuild/...`, `/aws/codedeploy/...` if configured | “First place for build failures and sometimes deploy diagnostics.” |
+| **EC2** | **EC2** → **Instances** → select instance | **Status checks** 2/2; correct **IAM role**; **Security groups** (3000 open for lab) | “Instance must reach S3; agent must run; SG must allow traffic you test.” |
+| **IAM** | **IAM** → **Roles** | CodePipeline service role, CodeBuild role, CodeDeploy role, EC2 instance profile | “Least privilege: each service has its own role; cross-service trust.” |
+
+---
+
+### CodePipeline source trigger options (often asked)
+
+| Setting (Source stage) | Console label / behavior | When it runs |
+|---|---|---|
+| **Amazon CloudWatch Events** | “Recommended” change detection | Near real-time when CodeCommit receives a push |
+| **AWS CodePipeline** (polling) | Older polling mode | Checks periodically (minutes), slower |
+
+Your guide uses **CloudWatch Events** on CodeCommit so a push (including one mirrored from GitHub Actions) starts the pipeline without manual **Release change**.
+
+---
+
+### CloudWatch Logs — names to recognize
+
+| Log group pattern | What writes here | When you care |
+|---|---|---|
+| `/aws/codebuild/<project-name>` | CodeBuild | Build fails (npm, tests, zip, permissions) |
+| `/aws/codedeploy/...` | Optional agent/plugin logging | Deploy debugging (not always enabled for EC2 the same way as Lambda) |
+| **Custom** app log | Your `nohup` → `/var/log/app.log` on EC2 | Runtime errors after deploy |
+
+---
+
+### Symptom → first console stop (debugging map)
+
+| Symptom | Open first | What to mention in an interview |
+|---|---|---|
+| Pipeline **Source** failed | CodeCommit repo exists; branch `main`; mirror workflow on GitHub succeeded | “Verify commit landed in CodeCommit before blaming pipeline.” |
+| Pipeline **Build** failed | CodeBuild → failed build → **Logs** | “Read bottom of log for exit code; often tests or missing file in repo.” |
+| Pipeline **Deploy** failed | CodeDeploy → deployment → **Lifecycle event** errors | “ValidateService non-zero, missing appspec, wrong paths, agent down.” |
+| App not reachable in browser | EC2 **public IP**, **security group** port 3000, app binding `0.0.0.0` | “Network path vs deploy success — pipeline can succeed but app misconfigured.” |
+| Old version still showing | Browser cache; confirm **new deployment** succeeded; `curl` on instance | “Distinguish deploy pipeline vs process restart/caching.” |
+
+---
+
 ## ⚡ PART 6 — TESTING THE PIPELINE
 
-1. Make a change to `app.js` — change the version text:
+### Steps (make a real change)
+
+1. Edit `app.js` — change the version text, for example:
 ```javascript
 res.end('<h1>Hello from Blue/Green Deployment! Version 2.0</h1>');
 ```
 
-2. Push to **GitHub** only (Step 4 workflow updates CodeCommit for you):
+2. Push to **GitHub** only (Step 4 workflow updates CodeCommit):
 ```bash
 git add .
 git commit -m "Update to version 2.0"
 git push origin main
 ```
 
-3. In GitHub → **Actions**, confirm **Sync GitHub to CodeCommit** finished (usually under a minute). Then open **CodePipeline** — it should run all 3 stages after CodeCommit receives the commit.
+3. **GitHub** → **Actions** → workflow **Sync GitHub to CodeCommit** → wait until **green check**.
 
-4. After it completes, refresh `http://YOUR_EC2_PUBLIC_IP:3000` — it should now say **Version 2.0**
+4. **CodePipeline** → your pipeline → confirm new execution; all stages **Succeeded**.
+
+5. Refresh `http://YOUR_EC2_PUBLIC_IP:3000` — expect **Version 2.0**.
+
+---
+
+### End-to-end flow table (order matters)
+
+| Step | Where | Success signal |
+|---|---|---|
+| 1 | Local / IDE | Commit saved |
+| 2 | `git push origin main` | GitHub shows new commit |
+| 3 | GitHub Actions | Workflow run **Succeeded** |
+| 4 | CodeCommit (optional check) | Latest commit matches GitHub |
+| 5 | CodePipeline | New execution started automatically |
+| 6 | CodeBuild | Build **Succeeded**, artifact in S3 |
+| 7 | CodeDeploy | Deployment **Succeeded** |
+| 8 | Browser / `curl` | New version text |
+
+---
+
+### CodePipeline execution — statuses you see in the console
+
+| Status | Meaning | Typical next step |
+|---|---|---|
+| **In progress** | A stage is running | Wait; open stage detail for live links to CodeBuild/CodeDeploy |
+| **Succeeded** | All stages finished OK | Verify app behavior on EC2 |
+| **Failed** | One stage stopped with error | Click the **failed stage** → link to CodeBuild logs or CodeDeploy events |
+| **Superseded** | Newer execution replaced this one (if pipeline mode allows) | Compare execution IDs — interview: “avoid running outdated deploys twice.” |
+| **Cancelled** | User or policy stopped it | Check who/what cancelled |
+
+---
+
+### Stage failure — likely causes (interview-style)
+
+| Failed stage | Common causes | Console evidence |
+|---|---|---|
+| **Source** | Wrong branch name; CodeCommit empty; IAM pipeline role cannot read repo | Source error message; CodeCommit **Commits** tab |
+| **Build** | `buildspec.yml` typo; `npm test` fails; missing dependency | CodeBuild log tail |
+| **Deploy** | CodeDeploy agent stopped; `appspec.yml` path wrong; hook script exits non-zero | CodeDeploy event log; `/var/log/aws/codedeploy-agent/` on EC2 |
 
 ---
 
